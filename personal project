@@ -1,0 +1,128 @@
+import streamlit as st
+import pandas as pd
+from geopy.geocoders import Nominatim
+from geopy.distance import geodesic
+import itertools
+
+# Initialize Geocoder
+geolocator = Nominatim(user_agent="eco_commute_optimizer")
+
+# Emissions Factors (kg CO2 per mile)
+EMISSION_FACTORS = {
+    "Gasoline Car": 0.404,
+    "Electric Vehicle (EV)": 0.120,
+    "Public Transit": 0.140,
+    "Walking / Biking": 0.000
+}
+
+# Average MPG or equivalent efficiency
+EFFICIENCY = {
+    "Gasoline Car": "25 MPG",
+    "Electric Vehicle (EV)": "0.3 kWh/mi",
+    "Public Transit": "N/A",
+    "Walking / Biking": "N/A"
+}
+
+def get_coordinates(address):
+    """Fetch latitude and longitude for a given address."""
+    try:
+        location = geolocator.geocode(address)
+        if location:
+            return (location.latitude, location.longitude)
+    except Exception:
+        return None
+    return None
+
+def solve_tsp(locations):
+    """Find the optimal route visiting all locations and returning to start."""
+    num_locs = len(locations)
+    if num_locs < 2:
+        return list(range(num_locs)), 0.0
+
+    # Index 0 is the start point
+    other_indices = list(range(1, num_locs))
+    best_perm = None
+    min_distance = float('inf')
+
+    for perm in itertools.permutations(other_indices):
+        current_route = [0] + list(perm) + [0]
+        current_distance = 0.0
+        for i in range(len(current_route) - 1):
+            idx1, idx2 = current_route[i], current_route[i+1]
+            p1, p2 = locations[idx1]['coords'], locations[idx2]['coords']
+            current_distance += geodesic(p1, p2).miles
+
+        if current_distance < min_distance:
+            min_distance = current_distance
+            best_perm = current_route
+
+    return best_perm, min_distance
+
+# --- Streamlit UI ---
+st.set_page_config(page_title="Eco-Commute Route Optimizer", layout="wide")
+
+st.title("🌱 Local Event & Eco-Commute Route Optimizer")
+st.write("Optimize your multi-stop route to minimize travel distance and reduce carbon emissions.")
+
+col1, col2 = st.sidebar, st.container()
+
+with col1:
+    st.header("1. Route Settings")
+    start_address = st.text_input("Starting Location", "Greensboro, NC")
+    
+    st.subheader("Destinations")
+    dest_input = st.text_area("Enter destinations (one per line)", "High Point, NC\nWinston-Salem, NC\nBurlington, NC")
+    
+    st.subheader("Transportation Mode")
+    transport_mode = st.selectbox("Select Vehicle Type", list(EMISSION_FACTORS.keys()))
+    
+    run_btn = st.button("Optimize Route", type="primary")
+
+if run_btn:
+    destinations = [d.strip() for d in dest_input.split("\n") if d.strip()]
+    all_places = [start_address] + destinations
+    
+    with st.spinner("Geocoding locations..."):
+        loc_data = []
+        for place in all_places:
+            coords = get_coordinates(place)
+            if coords:
+                loc_data.append({"name": place, "coords": coords})
+            else:
+                st.error(f"Could not find coordinates for: **{place}**")
+
+    if len(loc_data) > 1:
+        with st.spinner("Calculating optimal route..."):
+            route_indices, total_miles = solve_tsp(loc_data)
+            
+            # Calculate metrics
+            co2_emitted = total_miles * EMISSION_FACTORS[transport_mode]
+            baseline_co2 = total_miles * EMISSION_FACTORS["Gasoline Car"]
+            co2_saved = max(0.0, baseline_co2 - co2_emitted)
+
+        # Display Metrics
+        st.subheader("Route Analytics")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Distance", f"{total_miles:.2f} miles")
+        m2.metric("Transport Mode", transport_mode)
+        m3.metric("Est. CO2 Emissions", f"{co2_emitted:.2f} kg")
+        m4.metric("CO2 Saved vs Gas Car", f"{co2_saved:.2f} kg")
+
+        # Display Itinerary
+        st.subheader("Optimized Itinerary")
+        itinerary = []
+        for step, idx in enumerate(route_indices):
+            itinerary.append({
+                "Step": step + 1,
+                "Location": loc_data[idx]['name'],
+                "Latitude": loc_data[idx]['coords'][0],
+                "Longitude": loc_data[idx]['coords'][1]
+            })
+        
+        df_itinerary = pd.DataFrame(itinerary)
+        st.table(df_itinerary[["Step", "Location"]])
+
+        # Map Visualization
+        st.subheader("Route Map")
+        map_data = pd.DataFrame([loc['coords'] for loc in loc_data], columns=['lat', 'lon'])
+        st.map(map_data)
